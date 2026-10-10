@@ -46,3 +46,24 @@ fn parse_serve_internal_no_idle_timeout_rejects_duration_override() {
     .unwrap_err();
     assert!(error.to_string().contains("cannot be used together"));
 }
+
+#[test]
+fn parse_serve_accepts_parent_pid() {
+    let parsed = crate::cli::serve::parse_serve_args(
+        ["--parent-pid", "12345"]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .collect(),
+    )
+    .unwrap();
+    assert_eq!(parsed.parent_pid, Some(12345));
+
+    let invalid = crate::cli::serve::parse_serve_args(
+        ["--parent-pid", "not-a-number"]
+            .into_iter()
+            .map(std::ffi::OsString::from)
+            .collect(),
+    )
+    .unwrap_err();
+    assert!(invalid.to_string().contains("--parent-pid must be an integer PID"));
+}

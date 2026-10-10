@@ -294,9 +294,11 @@ pub(crate) enum InstanceScope {
         config_path: Option<std::path::PathBuf>,
         runtime_home: Option<std::path::PathBuf>,
         state_home: Option<std::path::PathBuf>,
+        parent_pid: Option<u32>,
     },
     User {
         state_home: Option<std::path::PathBuf>,
+        parent_pid: Option<u32>,
     },
 }
 
@@ -308,6 +310,7 @@ struct InstanceTarget {
     cwd: std::path::PathBuf,
     config_path: Option<std::path::PathBuf>,
     idle_timeout: Option<std::time::Duration>,
+    parent_pid: Option<u32>,
 }
 
 const AUTO_SPAWN_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
@@ -335,6 +338,7 @@ async fn client_command_preamble(
         {
             InstanceScope::User {
                 state_home: option_path(args, "--state-home")?,
+                parent_pid: None,
             }
         }
         "secret"
@@ -347,6 +351,7 @@ async fn client_command_preamble(
         {
             InstanceScope::User {
                 state_home: option_path(args, "--state-home")?,
+                parent_pid: None,
             }
         }
         "identity"
@@ -363,8 +368,12 @@ async fn client_command_preamble(
                     config_path: None,
                     runtime_home: None,
                     state_home: Some(state_home),
+                    parent_pid: None,
                 },
-                None => InstanceScope::User { state_home: None },
+                None => InstanceScope::User {
+                    state_home: None,
+                    parent_pid: None,
+                },
             }
         }
         "tool"
@@ -381,6 +390,7 @@ async fn client_command_preamble(
                 config_path: None,
                 runtime_home: None,
                 state_home: option_path(args, "--state-home")?,
+                parent_pid: None,
             }
         }
         "chat" if !has_option(args, "--attach") => InstanceScope::Project {
@@ -388,6 +398,7 @@ async fn client_command_preamble(
             config_path: option_path(args, "--config")?,
             runtime_home: option_path(args, "--runtime-home")?,
             state_home: option_path(args, "--state-home")?,
+            parent_pid: Some(std::process::id()),
         },
         _ => return Ok(None),
     };
@@ -420,23 +431,30 @@ pub(crate) async fn connect_instance(
             config_path,
             runtime_home,
             state_home,
+            parent_pid,
         } => {
-            let target =
+            let mut target =
                 resolve_project_instance_target(cwd, config_path, runtime_home, state_home, None)?;
+            target.parent_pid = parent_pid;
             let roots = vec![target.state_root.clone()];
             (target, roots)
         }
-        InstanceScope::User { state_home } => {
+        InstanceScope::User {
+            state_home,
+            parent_pid,
+        } => {
             // Auth prefers the current project instance when it owns the
             // requested user root, then checks the user-root endpoint.
             let cwd = std::env::current_dir().map_err(io_error)?;
             let project = crate::daemon::daemon_config::discover_verlet_project(&cwd)?;
             if !project.found_project {
-                let target = resolve_user_home_instance_target(state_home)?;
+                let mut target = resolve_user_home_instance_target(state_home)?;
+                target.parent_pid = parent_pid;
                 let root = target.user_state_root.clone();
                 (target, vec![root])
             } else {
                 let mut target = resolve_project_instance_target(cwd, None, None, None, None)?;
+                target.parent_pid = parent_pid;
                 let requested_user_root = match state_home {
                     Some(state_home) => crate::cli::console::absolute_path(&state_home)?,
                     None => target.user_state_root.clone(),
@@ -548,6 +566,7 @@ fn resolve_project_instance_target(
         cwd: crate::cli::console::absolute_path(&resolved.config.cwd)?,
         config_path: resolved.config_path,
         idle_timeout: resolved.idle_timeout,
+        parent_pid: None,
     })
 }
 
@@ -576,6 +595,7 @@ fn resolve_user_home_instance_target(
         cwd: user_home,
         config_path,
         idle_timeout,
+        parent_pid: None,
     })
 }
 
@@ -626,6 +646,9 @@ fn spawn_instance_server(target: &InstanceTarget) -> crate::kernel::runtime_host
         .stderr(std::process::Stdio::from(stderr));
     if let Some(config_path) = &target.config_path {
         command.arg("--config").arg(config_path);
+    }
+    if let Some(parent_pid) = target.parent_pid {
+        command.arg("--parent-pid").arg(parent_pid.to_string());
     }
     {
         use std::os::unix::process::CommandExt as _;

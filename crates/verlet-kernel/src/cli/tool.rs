@@ -727,6 +727,7 @@ pub(crate) async fn tool_run(
                 let names = required_secret_names.into_iter().collect::<Vec<_>>();
                 let mut client = crate::cli::connect_instance(crate::cli::InstanceScope::User {
                     state_home: options.state_home.clone(),
+                    parent_pid: None,
                 })
                 .await?;
                 let response = client.secret_resolve(&names).await;

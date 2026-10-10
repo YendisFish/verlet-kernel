@@ -81,16 +81,31 @@ pub(crate) async fn run_serve(
         eprintln!("verlet serve config <defaults>");
     }
     eprintln!("verlet serve state {}", state_home.display());
-    serve_until_stopped(&server, listen, idle_timeout).await
+    serve_until_stopped(&server, listen, idle_timeout, options.parent_pid).await
 }
 
 async fn serve_until_stopped(
     server: &crate::adapters::app_server::VerletAppServer,
     listen: crate::adapters::app_server::AppServerListenAddr,
     idle_timeout: Option<std::time::Duration>,
+    parent_pid: Option<u32>,
 ) -> crate::kernel::runtime_host::VerletResult<()> {
+    let parent_watcher = async {
+        if let Some(pid) = parent_pid {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                if !crate::adapters::app_server::instance::process_is_live(pid) {
+                    eprintln!("verlet serve launcher process {pid} exited; shutting down");
+                    return;
+                }
+            }
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
     let serving = server.serve(listen);
     tokio::pin!(serving);
+    tokio::pin!(parent_watcher);
     let serving_result = match idle_timeout {
         Some(idle_timeout) => {
             tokio::select! {
@@ -100,9 +115,21 @@ async fn serve_until_stopped(
                     server.shutdown().await?;
                     serving.await
                 }
+                () = &mut parent_watcher => {
+                    server.shutdown().await?;
+                    serving.await
+                }
             }
         }
-        None => serving.await,
+        None => {
+            tokio::select! {
+                result = &mut serving => result,
+                () = &mut parent_watcher => {
+                    server.shutdown().await?;
+                    serving.await
+                }
+            }
+        }
     };
     let shutdown = server.shutdown().await;
     serving_result?;
@@ -161,6 +188,7 @@ pub(crate) struct ServeArgs {
     pub(crate) user_state_home: Option<std::path::PathBuf>,
     pub(crate) idle_timeout: Option<std::time::Duration>,
     pub(crate) no_idle_timeout: bool,
+    pub(crate) parent_pid: Option<u32>,
     pub(crate) help: bool,
 }
 
@@ -174,6 +202,7 @@ pub(crate) fn parse_serve_args(
     let mut user_state_home = None;
     let mut idle_timeout = None;
     let mut no_idle_timeout = false;
+    let mut parent_pid = None;
     let mut help = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -218,6 +247,13 @@ pub(crate) fn parse_serve_args(
                 }
                 idle_timeout = Some(duration);
             }
+            "--parent-pid" => {
+                let raw = crate::cli::tool::required_string_value(&mut iter, "--parent-pid")?;
+                let pid = raw.parse::<u32>().map_err(|error| {
+                    crate::cli::usage_error(format!("--parent-pid must be an integer PID: {error}"))
+                })?;
+                parent_pid = Some(pid);
+            }
             other => {
                 return Err(crate::cli::usage_error(format!(
                     "unknown serve argument {other:?}"
@@ -238,6 +274,7 @@ pub(crate) fn parse_serve_args(
         user_state_home,
         idle_timeout,
         no_idle_timeout,
+        parent_pid,
         help,
     })
 }
@@ -247,7 +284,7 @@ pub(crate) fn print_serve_help() {
         "verlet serve\n\
 \n\
 Usage:\n\
-  verlet serve [--config verlet.toml] [--cwd <path>] [--runtime-home <path>] [--state-home <path>] [--idle-timeout <duration>]\n\
+  verlet serve [--config verlet.toml] [--cwd <path>] [--runtime-home <path>] [--state-home <path>] [--idle-timeout <duration>] [--parent-pid <pid>]\n\
 \n\
 Runs the Verlet app-server in the foreground. Without --idle-timeout the server\n\
 uses daemon.idle_timeout when configured; otherwise it continues until it\n\
